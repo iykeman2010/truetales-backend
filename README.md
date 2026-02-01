@@ -1,0 +1,2 @@
+# truetales-backend
+PAID READ &amp; PAID POST STORY PLATFORM (NIGERIA-READY)
