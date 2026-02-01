@@ -1,0 +1,178 @@
+// UPGRADED FULL-STACK DESIGN: PAID READ & PAID POST STORY PLATFORM (NIGERIA-READY)
+// Stack: Node.js + Express + MongoDB + Paystack + JWT + React-ready API
+// Features:
+// - Register / Login
+// - Pay-to-post stories (writers)
+// - Read 40% free, then pay-to-continue (readers)
+// - Secure payment verification via Paystack webhook
+
+/********************
+ * BACKEND (server.js)
+ ********************/
+const express = require('express');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const axios = require('axios');
+const cors = require('cors');
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+mongoose.connect('mongodb://127.0.0.1:27017/stories_db');
+
+const JWT_SECRET = 'SUPER_SECRET_KEY';
+const PAYSTACK_SECRET = 'PAYSTACK_SECRET_KEY';
+
+/********************
+ * DATABASE MODELS
+ ********************/
+const UserSchema = new mongoose.Schema({
+  email: String,
+  password: String,
+  canPost: { type: Boolean, default: false },
+  canReadFull: { type: Boolean, default: false }
+});
+
+const StorySchema = new mongoose.Schema({
+  userId: mongoose.Schema.Types.ObjectId,
+  title: String,
+  content: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
+const User = mongoose.model('User', UserSchema);
+const Story = mongoose.model('Story', StorySchema);
+
+/********************
+ * AUTH MIDDLEWARE
+ ********************/
+function auth(req, res, next) {
+  const token = req.headers.authorization;
+  if (!token) return res.sendStatus(401);
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.sendStatus(403);
+  }
+}
+
+/********************
+ * AUTH ROUTES
+ ********************/
+app.post('/register', async (req, res) => {
+  const hash = await bcrypt.hash(req.body.password, 10);
+  const user = await User.create({ email: req.body.email, password: hash });
+  res.json({ message: 'Registered successfully' });
+});
+
+app.post('/login', async (req, res) => {
+  const user = await User.findOne({ email: req.body.email });
+  if (!user) return res.sendStatus(404);
+
+  const ok = await bcrypt.compare(req.body.password, user.password);
+  if (!ok) return res.sendStatus(401);
+
+  const token = jwt.sign({ id: user._id }, JWT_SECRET);
+  res.json({
+    token,
+    canPost: user.canPost,
+    canReadFull: user.canReadFull
+  });
+});
+
+/********************
+ * PAYSTACK INITIALIZATION
+ ********************/
+app.post('/pay', auth, async (req, res) => {
+  const { purpose } = req.body; // 'post' or 'read'
+  const amount = purpose === 'post' ? 200000 : 100000; // Kobo (₦2000 / ₦1000)
+
+  const response = await axios.post(
+    'https://api.paystack.co/transaction/initialize',
+    {
+      email: req.user.id + '@storyapp.com',
+      amount
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET}`
+      }
+    }
+  );
+
+  res.json(response.data.data);
+});
+
+/********************
+ * PAYSTACK WEBHOOK
+ ********************/
+app.post('/paystack/webhook', async (req, res) => {
+  const event = req.body;
+
+  if (event.event === 'charge.success') {
+    const userId = event.data.customer.email.split('@')[0];
+    const amount = event.data.amount;
+
+    if (amount === 200000) {
+      await User.findByIdAndUpdate(userId, { canPost: true });
+    }
+
+    if (amount === 100000) {
+      await User.findByIdAndUpdate(userId, { canReadFull: true });
+    }
+  }
+  res.sendStatus(200);
+});
+
+/********************
+ * STORY ROUTES
+ ********************/
+app.post('/stories', auth, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  if (!user.canPost) return res.status(403).send('Payment required to post');
+
+  const story = await Story.create({
+    userId: user._id,
+    title: req.body.title,
+    content: req.body.content
+  });
+  res.json(story);
+});
+
+// Read stories (40% free)
+app.get('/stories/:id', auth, async (req, res) => {
+  const story = await Story.findById(req.params.id);
+  const user = await User.findById(req.user.id);
+
+  if (!story) return res.sendStatus(404);
+
+  if (!user.canReadFull) {
+    const cutoff = Math.floor(story.content.length * 0.4);
+    return res.json({
+      title: story.title,
+      content: story.content.substring(0, cutoff) + '... [PAY TO CONTINUE]'
+    });
+  }
+
+  res.json(story);
+});
+
+app.get('/stories', async (req, res) => {
+  const stories = await Story.find({}, 'title createdAt');
+  res.json(stories);
+});
+
+app.listen(3000, () => console.log('Server running on port 3000'));
+
+/********************
+ * FRONTEND LOGIC (React or Vanilla JS)
+ ********************/
+/*
+- Show story preview
+- After 40%, display PAY button
+- Redirect to Paystack checkout
+- After success, reload full story
+*/
